@@ -1,0 +1,23 @@
+.layout-scroll-wrapper {
+    position: relative;
+    width: 100%;
+    max-width: 100%;
+    overflow-x: auto;
+    overflow-y: visible;
+    box-sizing: border-box;
+    -webkit-overflow-scrolling: touch;
+    scroll-behavior: smooth;
+    scrollbar-gutter: stable both-edges;
+}
+
+.layout-scroll-wrapper__inner {
+    min-width: 100%;
+    width: 100%;
+    max-width: 100%;
+    display: block;
+    box-sizing: border-box;
+}
+
+.layout-scroll-wrapper__inner > * {
+    min-width: 0;
+}

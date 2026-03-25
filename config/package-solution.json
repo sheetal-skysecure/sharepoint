@@ -1,0 +1,46 @@
+{
+  "$schema": "https://developer.microsoft.com/json-schemas/spfx-build/package-solution.schema.json",
+  "solution": {
+    "name": "spfx-learning-center-client-side-solution",
+    "id": "62dc33e4-3c38-449e-be22-e0707328b020",
+    "version": "1.0.0.0",
+    "includeClientSideAssets": true,
+    "skipFeatureDeployment": true,
+    "isDomainIsolated": false,
+    "developer": {
+      "name": "",
+      "websiteUrl": "",
+      "privacyUrl": "",
+      "termsOfUseUrl": "",
+      "mpnId": "Undefined-1.20.0"
+    },
+    "metadata": {
+      "shortDescription": {
+        "default": "spfx-learning-center description"
+      },
+      "longDescription": {
+        "default": "spfx-learning-center description"
+      },
+      "screenshotPaths": [],
+      "videoUrl": "",
+      "categories": []
+    },
+    "webApiPermissionRequests": [
+      {
+        "resource": "Microsoft Graph",
+        "scope": "User.Read.All"
+      }
+    ],
+    "features": [
+      {
+        "title": "spfx-learning-center Feature",
+        "description": "The feature that activates elements of the spfx-learning-center solution.",
+        "id": "ce769e3d-ebc3-4356-90dd-bb18110ff802",
+        "version": "1.0.0.0"
+      }
+    ]
+  },
+  "paths": {
+    "zippedPackage": "solution/spfx-learning-center.sppkg"
+  }
+}

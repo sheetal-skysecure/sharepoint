@@ -1,0 +1,29 @@
+
+
+{
+  "$schema": "https://developer.microsoft.com/json-schemas/spfx-build/config.2.0.schema.json",
+  "version": "2.0",
+  "bundles": {
+    "learning-center-web-part": {
+      "components": [
+        {
+          "entrypoint": "./lib/webparts/learningCenter/LearningCenterWebPart.js",
+          "manifest": "./src/webparts/learningCenter/LearningCenterWebPart.manifest.json"
+        }
+      ]
+    },
+    "admin-access-web-part": {
+      "components": [
+        {
+          "entrypoint": "./lib/webparts/adminAccess/AdminAccessWebPart.js",
+          "manifest": "./src/webparts/adminAccess/AdminAccessWebPart.manifest.json"
+        }
+      ]
+    }
+  },
+  "externals": {},
+  "localizedResources": {
+    "LearningCenterWebPartStrings": "lib/webparts/learningCenter/loc/{locale}.js",
+    "AdminAccessWebPartStrings": "lib/webparts/adminAccess/loc/{locale}.js"
+  }
+}

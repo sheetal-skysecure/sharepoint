@@ -1,0 +1,13 @@
+﻿{
+  "$schema": "https://developer.microsoft.com/json-schemas/spfx-build/spfx-serve.schema.json",
+  "port": 4321,
+  "https": true,
+  "serveConfigurations": {
+    "default": {
+      "pageUrl": "https://skysecuretech.sharepoint.com/sites/LearningandskillDevelopment/_layouts/15/workbench.aspx?debug=true&noredir=true#/learning-center"
+    },
+    "admin": {
+      "pageUrl": "https://skysecuretech.sharepoint.com/sites/LearningandskillDevelopment/_layouts/15/workbench.aspx?debug=true&noredir=true#/admin"
+    }
+  }
+}

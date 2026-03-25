@@ -1,0 +1,4 @@
+﻿src/webparts/adminAccess/components/AdminPortal.tsx(2142,33): error TS2339: Property 'fileObject' does not exist on type '{ name: string; type: string; owner: any; status: string; description: string; size: string; path: string; }'.
+src/webparts/adminAccess/components/AdminPortal.tsx(2151,116): error TS2339: Property 'fileObject' does not exist on type '{ name: string; type: string; owner: any; status: string; description: string; size: string; path: string; }'.
+src/webparts/adminAccess/components/AdminPortal.tsx(2159,40): error TS2339: Property 'fileObject' does not exist on type '{ name: string; type: string; owner: any; status: string; description: string; size: string; path: string; }'.
+src/webparts/adminAccess/components/AdminPortal.tsx(2184,27): error TS2339: Property 'fileObject' does not exist on type '{ url: string; id: number; dateAdded: string; size: string; name: string; type: string; owner: any; status: string; description: string; path: string; }'.
