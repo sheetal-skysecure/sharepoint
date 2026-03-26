@@ -1417,14 +1417,44 @@ export default function CertificationsList() {
                     certId: trimmedCertId,
                     examDate: completionExamDate,
                     renewalDate: completionRenewalDate,
-                    examCode: trimmedExamCode
+                    examCode: trimmedExamCode,
+                    learnerEmail: (
+                        completionCert?.email ||
+                        completionCert?.userEmail ||
+                        activeUser?.email ||
+                        context?.userEmail ||
+                        SharePointService.getCurrentContextUserEmail() ||
+                        ''
+                    ).toString().trim().toLowerCase(),
+                    learnerName: (
+                        completionCert?.userName ||
+                        activeUser?.name ||
+                        context?.userDisplayName ||
+                        SharePointService.getCurrentContextUserName() ||
+                        ''
+                    ).toString().trim()
                 })
                 : SharePointService.updateCertificationCompletionRecord(normalizedCompletionRecordId, {
                     certificationName,
                     certId: trimmedCertId,
                     examDate: completionExamDate,
                     renewalDate: completionRenewalDate,
-                    examCode: trimmedExamCode
+                    examCode: trimmedExamCode,
+                    learnerEmail: (
+                        completionCert?.email ||
+                        completionCert?.userEmail ||
+                        activeUser?.email ||
+                        context?.userEmail ||
+                        SharePointService.getCurrentContextUserEmail() ||
+                        ''
+                    ).toString().trim().toLowerCase(),
+                    learnerName: (
+                        completionCert?.userName ||
+                        activeUser?.name ||
+                        context?.userDisplayName ||
+                        SharePointService.getCurrentContextUserName() ||
+                        ''
+                    ).toString().trim()
                 });
             const enrollmentSyncPromise = SharePointService.syncEnrollmentCompletion({
                 enrollmentId: completionCert?.enrollmentId,

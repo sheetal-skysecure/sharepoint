@@ -162,6 +162,7 @@ export interface IDepartmentProgressLearner {
     learner: string;
     learnerEmail: string;
     path: string;
+    certCode?: string;
     progress: number;
     department: string;
     status: string;
@@ -227,6 +228,8 @@ export interface ICertificationCompletionRecord {
     examDate: string;
     renewalDate: string;
     examCode?: string;
+    learnerEmail?: string;
+    learnerName?: string;
     created?: string;
     modified?: string;
     authorEmail?: string;
@@ -264,6 +267,9 @@ interface ICertificationCompletionListSchema {
     examDateField: string | null;
     renewalDateField: string | null;
     examCodeField: string | null;
+    learnerEmailField: string | null;
+    learnerNameField: string | null;
+    fieldTypes: Record<string, string>;
 }
 
 interface ISharePointListFieldInfo {
@@ -393,6 +399,10 @@ export class SharePointService {
     private static _documentLibraryPromise: Promise<any | null> | null = null;
     private static _membershipSnapshotCache: { siteUrl: string; snapshot: ISiteMembershipSnapshot } | null = null;
     private static _membershipSnapshotPromise: Promise<ISiteMembershipSnapshot> | null = null;
+    private static _siteGroupTitlesCache: { siteUrl: string; titles: Set<string> } | null = null;
+    private static _siteGroupTitlesPromise: Promise<Set<string>> | null = null;
+    private static _namedSiteGroupUsersCache = new Map<string, ILearnerDirectoryUser[]>();
+    private static _namedSiteGroupUsersPromiseCache = new Map<string, Promise<ILearnerDirectoryUser[]>>();
     private static _loggedResponseIssues = new Set<string>();
     private static _enrollmentListNameCache: string | null = null;
     private static _userNotificationListNameCache: string | null = null;
@@ -1168,15 +1178,24 @@ export class SharePointService {
             const listName = await this._ensureCertificationCompletionList();
             const escapedListName = this._escapeODataValue(listName);
             const fieldsData = await this._safeGetJson<any>(
-                `${siteUrl}/_api/web/lists/getbytitle('${escapedListName}')/fields?$select=Title,InternalName,StaticName,Hidden,ReadOnlyField`,
+                `${siteUrl}/_api/web/lists/getbytitle('${escapedListName}')/fields?$select=Title,InternalName,StaticName,Hidden,ReadOnlyField,TypeAsString,FieldTypeKind`,
                 `${listName} completion fields`
             );
             const fields = this._toCollection(fieldsData) as ISharePointListFieldInfo[];
             const schema: ICertificationCompletionListSchema = {
-                certIdField: this._pickListFieldName(fields, ['CertID', 'Cert Id', 'CertificationId', 'Certification ID']),
-                examDateField: this._pickListFieldName(fields, ['ExamDate', 'Exam Date']),
-                renewalDateField: this._pickListFieldName(fields, ['RenewalDate', 'Renewal Date']),
-                examCodeField: this._pickListFieldName(fields, ['ExamCode', 'Exam Code'])
+                certIdField: this._pickListFieldNameByType(fields, ['CertID', 'Cert Id', 'CertificationId', 'Certification ID', 'Certd'], ['Text', 'Note', 'Choice']) ||
+                    this._pickListFieldName(fields, ['CertID', 'Cert Id', 'CertificationId', 'Certification ID', 'Certd']),
+                examDateField: this._pickListFieldNameByType(fields, ['ExamDate', 'Exam Date'], ['DateTime', 'Text', 'Note']) ||
+                    this._pickListFieldName(fields, ['ExamDate', 'Exam Date']),
+                renewalDateField: this._pickListFieldNameByType(fields, ['RenewalDate', 'Renewal Date'], ['DateTime', 'Text', 'Note']) ||
+                    this._pickListFieldName(fields, ['RenewalDate', 'Renewal Date']),
+                examCodeField: this._pickListFieldNameByType(fields, ['ExamCode', 'Exam Code'], ['Text', 'Note', 'Choice']) ||
+                    this._pickListFieldName(fields, ['ExamCode', 'Exam Code']),
+                learnerEmailField: this._pickListFieldNameByType(fields, ['LearnerEmail', 'Learner Email', 'UserEmail', 'User Email', 'Email'], ['Text', 'Note', 'Choice']) ||
+                    this._pickListFieldName(fields, ['LearnerEmail', 'Learner Email', 'UserEmail', 'User Email', 'Email']),
+                learnerNameField: this._pickListFieldNameByType(fields, ['LearnerName', 'Learner Name', 'UserName', 'User Name', 'Name'], ['Text', 'Note', 'Choice']) ||
+                    this._pickListFieldName(fields, ['LearnerName', 'Learner Name', 'UserName', 'User Name', 'Name']),
+                fieldTypes: this._getFieldTypeMap(fields)
             };
 
             console.log('[uploadlist] Resolved completion field schema', {
@@ -1184,7 +1203,9 @@ export class SharePointService {
                 certIdField: schema.certIdField,
                 examDateField: schema.examDateField,
                 renewalDateField: schema.renewalDateField,
-                examCodeField: schema.examCodeField
+                examCodeField: schema.examCodeField,
+                learnerEmailField: schema.learnerEmailField,
+                learnerNameField: schema.learnerNameField
             });
 
             this._certificationCompletionListSchemaCache = { siteUrl, schema };
@@ -2779,44 +2800,75 @@ export class SharePointService {
         });
     }
 
-    private static async _fetchNamedSiteGroupUsers(groupName: string): Promise<ILearnerDirectoryUser[]> {
+    private static async _fetchNamedSiteGroupUsers(groupName: string, forceRefresh: boolean = false): Promise<ILearnerDirectoryUser[]> {
         const normalizedGroupName = (groupName || '').toString().trim();
         if (!normalizedGroupName) {
             return [];
+        }
+
+        const cacheKey = `${this._getSiteUrl().toLowerCase()}::${normalizedGroupName.toLowerCase()}`;
+        if (!forceRefresh) {
+            const cachedUsers = this._namedSiteGroupUsersCache.get(cacheKey);
+            if (cachedUsers) {
+                return cachedUsers;
+            }
+
+            const pendingRequest = this._namedSiteGroupUsersPromiseCache.get(cacheKey);
+            if (pendingRequest) {
+                return pendingRequest;
+            }
         }
 
         const endpoint = this._getApiUrl(
             `/_api/web/sitegroups/getbyname('${this._escapeODataValue(normalizedGroupName)}')/users?$select=Id,Title,Email,LoginName`
         );
 
-        try {
-            const data = await this._safeGetJson<any>(endpoint, `${normalizedGroupName} group users`);
-            return this._toCollection(data)
-                .map((user: any) => {
-                    const normalizedUser = this._normalizeDirectoryUser(user, 'Member', normalizedGroupName);
-                    if (!normalizedUser) {
-                        return null;
-                    }
+        let requestPromise: Promise<ILearnerDirectoryUser[]> | null = null;
+        requestPromise = (async () => {
+            try {
+                const data = await this._safeGetJson<any>(endpoint, `${normalizedGroupName} group users`);
+                const users = this._toCollection(data)
+                    .map((user: any) => {
+                        const normalizedUser = this._normalizeDirectoryUser(user, 'Member', normalizedGroupName);
+                        if (!normalizedUser) {
+                            return null;
+                        }
 
-                    return {
-                        ...normalizedUser,
-                        group: normalizedGroupName,
-                        siteGroup: normalizedGroupName,
-                        role: 'Member'
-                    } as ILearnerDirectoryUser;
-                })
-                .filter((user: ILearnerDirectoryUser | null): user is ILearnerDirectoryUser => !!user);
-        } catch (error) {
-            this._logResponseIssueOnce(
-                `site-group-by-name:${normalizedGroupName}`,
-                `[Learners] SharePoint group '${normalizedGroupName}' is unavailable. Falling back to the synced learner directory.`,
-                {
-                    endpoint,
-                    error
+                        return {
+                            ...normalizedUser,
+                            group: normalizedGroupName,
+                            siteGroup: normalizedGroupName,
+                            role: 'Member'
+                        } as ILearnerDirectoryUser;
+                    })
+                    .filter((user: ILearnerDirectoryUser | null): user is ILearnerDirectoryUser => !!user);
+
+                this._namedSiteGroupUsersCache.set(cacheKey, users);
+                return users;
+            } catch (error) {
+                const isNotFound = error instanceof Error && error.message.toLowerCase().indexOf('http 404') !== -1;
+                if (isNotFound) {
+                    this._namedSiteGroupUsersCache.set(cacheKey, []);
                 }
-            );
-            return [];
-        }
+
+                this._logResponseIssueOnce(
+                    `site-group-by-name:${normalizedGroupName}`,
+                    `[Learners] SharePoint group '${normalizedGroupName}' is unavailable. Falling back to the synced learner directory.`,
+                    {
+                        endpoint,
+                        error
+                    }
+                );
+                return [];
+            } finally {
+                if (requestPromise && this._namedSiteGroupUsersPromiseCache.get(cacheKey) === requestPromise) {
+                    this._namedSiteGroupUsersPromiseCache.delete(cacheKey);
+                }
+            }
+        })();
+
+        this._namedSiteGroupUsersPromiseCache.set(cacheKey, requestPromise);
+        return requestPromise;
     }
 
     private static async _getAssociatedSiteGroups(): Promise<Array<{
@@ -2859,6 +2911,40 @@ export class SharePointService {
         }
 
         return this._assessmentAssignmentGroups;
+    }
+
+    private static async _getSiteGroupTitles(forceRefresh: boolean = false): Promise<Set<string>> {
+        const siteUrl = this._getSiteUrl();
+        if (!forceRefresh && this._siteGroupTitlesCache?.siteUrl === siteUrl) {
+            return this._siteGroupTitlesCache.titles;
+        }
+
+        if (!forceRefresh && this._siteGroupTitlesPromise) {
+            return this._siteGroupTitlesPromise;
+        }
+
+        const endpoint = this._getApiUrl('/_api/web/sitegroups?$select=Title&$top=5000');
+        const requestPromise = (async () => {
+            const data = await this._safeGetJson<any>(endpoint, 'SharePoint site group titles');
+            const titles = new Set(
+                this._toCollection(data)
+                    .map((group: any) => (group?.Title || '').toString().trim().toLowerCase())
+                    .filter((title: string) => !!title)
+            );
+
+            this._siteGroupTitlesCache = { siteUrl, titles };
+            return titles;
+        })();
+
+        this._siteGroupTitlesPromise = requestPromise;
+
+        try {
+            return await requestPromise;
+        } finally {
+            if (this._siteGroupTitlesPromise === requestPromise) {
+                this._siteGroupTitlesPromise = null;
+            }
+        }
     }
 
     private static async _fetchAllSiteUsers(): Promise<ILearnerDirectoryUser[]> {
@@ -3360,7 +3446,9 @@ export class SharePointService {
             this._ensureTextFieldOnList(listName, 'CertID'),
             this._ensureDateFieldOnList(listName, 'ExamDate'),
             this._ensureDateFieldOnList(listName, 'RenewalDate'),
-            this._ensureTextFieldOnList(listName, 'ExamCode')
+            this._ensureTextFieldOnList(listName, 'ExamCode'),
+            this._ensureTextFieldOnList(listName, 'LearnerEmail'),
+            this._ensureTextFieldOnList(listName, 'LearnerName')
         ]);
         this._certificationCompletionListSchemaCache = null;
         this._certificationCompletionListSchemaPromise = null;
@@ -3551,6 +3639,104 @@ export class SharePointService {
             enrollment?.certificateName ||
             ''
         ).toString().trim();
+    }
+
+    private static _getDeletedEnrollmentTimestampByPath(deletedLogs: IAuditLogRecord[]): Map<string, number> {
+        const deletedTimestampByPath = new Map<string, number>();
+
+        (deletedLogs || []).forEach((log) => {
+            const normalizedPathId = (log.pathId || log.assignmentName || '').toString().trim().toLowerCase();
+            if (!normalizedPathId) {
+                return;
+            }
+
+            const deletedAtMs = Date.parse(
+                (log.timestamp || log.assignmentDate || log.created || '').toString()
+            );
+            const normalizedDeletedAtMs = Number.isFinite(deletedAtMs) ? deletedAtMs : 0;
+            const existingDeletedAtMs = deletedTimestampByPath.get(normalizedPathId) || 0;
+
+            if (normalizedDeletedAtMs >= existingDeletedAtMs) {
+                deletedTimestampByPath.set(normalizedPathId, normalizedDeletedAtMs);
+            }
+        });
+
+        return deletedTimestampByPath;
+    }
+
+    private static _getEnrollmentAssignedAtMs(enrollment?: Partial<IEnrollment> | null): number {
+        const candidateDates = [
+            enrollment?.assignedDate,
+            enrollment?.startDate,
+            enrollment?.examScheduledDate,
+            enrollment?.endDate
+        ];
+
+        for (const candidate of candidateDates) {
+            const parsedDateMs = Date.parse((candidate || '').toString());
+            if (Number.isFinite(parsedDateMs)) {
+                return parsedDateMs;
+            }
+        }
+
+        return 0;
+    }
+
+    private static _isEnrollmentSuppressedByDeletedAuditLog(
+        enrollment: Partial<IEnrollment> | null | undefined,
+        deletedTimestampByPath: Map<string, number>
+    ): boolean {
+        const normalizedPathId = this._getEnrollmentPathId(enrollment).toLowerCase();
+        if (!normalizedPathId) {
+            return false;
+        }
+
+        const deletedAtMs = deletedTimestampByPath.get(normalizedPathId);
+        if (!deletedAtMs) {
+            return false;
+        }
+
+        const enrollmentAssignedAtMs = this._getEnrollmentAssignedAtMs(enrollment);
+        return enrollmentAssignedAtMs <= 0 || enrollmentAssignedAtMs <= deletedAtMs;
+    }
+
+    private static async _getActiveEnrollmentsForUser(userEmail: string, existingEnrollments?: IEnrollment[]): Promise<IEnrollment[]> {
+        const normalizedEmail = (userEmail || '').toString().trim().toLowerCase();
+        if (!normalizedEmail) {
+            return [];
+        }
+
+        const baseEnrollments = existingEnrollments || await this.getEnrollments(normalizedEmail).catch(() => [] as IEnrollment[]);
+        let deletedLogs: IAuditLogRecord[] = [];
+        let removedEnrollmentCount = 0;
+
+        try {
+            const learnerUserId = await this._getSiteUserIdByEmail(normalizedEmail).catch(() => null);
+            const syncResult = await this.syncDeletedAuditLogs(normalizedEmail, learnerUserId || undefined, baseEnrollments);
+            deletedLogs = syncResult.deletedLogs || [];
+            removedEnrollmentCount = Number(syncResult.removedEnrollmentCount || 0);
+        } catch (error) {
+            console.warn('[Enrollments] Failed to reconcile deleted audit logs before reading active enrollments.', {
+                userEmail: normalizedEmail,
+                error
+            });
+        }
+
+        const deletedTimestampByPath = this._getDeletedEnrollmentTimestampByPath(deletedLogs);
+        if (removedEnrollmentCount > 0) {
+            const refreshedEnrollments = await this.getEnrollments(normalizedEmail).catch(() => [] as IEnrollment[]);
+            return this._dedupeEnrollments(
+                refreshedEnrollments.filter((item) => !this._isEnrollmentSuppressedByDeletedAuditLog(item, deletedTimestampByPath))
+            );
+        }
+
+        if (deletedTimestampByPath.size === 0) {
+            return this._dedupeEnrollments(baseEnrollments);
+        }
+
+        return this._dedupeEnrollments(
+            baseEnrollments.filter((item) => !this._isEnrollmentSuppressedByDeletedAuditLog(item, deletedTimestampByPath))
+        );
     }
 
     private static _dedupeEnrollments(enrollments: IEnrollment[]): IEnrollment[] {
@@ -5771,8 +5957,11 @@ export class SharePointService {
             });
             const data = await this._safeGetJson<any>(endpoint, `duplicate enrollment check for ${normalizedEmail}`);
             const items = this._toCollection(data);
-            const alreadyEnrolled = items.some((item: any) => {
-                const mapped = this._mapEnrollmentItem(item, context.schema);
+            const activeEnrollments = await this._getActiveEnrollmentsForUser(
+                normalizedEmail,
+                items.map((item: any) => this._mapEnrollmentItem(item, context.schema))
+            );
+            const alreadyEnrolled = activeEnrollments.some((mapped) => {
                 const mappedCertCode = (mapped.certCode || mapped.pathId || '').toString().trim().toLowerCase();
                 return (mapped.userEmail || '').toLowerCase() === normalizedEmail &&
                     (
@@ -5798,7 +5987,7 @@ export class SharePointService {
                 certCode: normalizedCertCode,
                 error
             });
-            const enrollments = await this.getEnrollments(normalizedEmail);
+            const enrollments = await this._getActiveEnrollmentsForUser(normalizedEmail);
             return enrollments.some((item) =>
                 (item.userEmail || '').toLowerCase() === normalizedEmail &&
                 (
@@ -5838,8 +6027,11 @@ export class SharePointService {
             });
             const data = await this._safeGetJson<any>(endpoint, `duplicate enrollment check for certification id ${normalizedCertificationId}`);
             const items = this._toCollection(data);
-            const alreadyEnrolled = items.some((item: any) => {
-                const mapped = this._mapEnrollmentItem(item, context.schema);
+            const activeEnrollments = await this._getActiveEnrollmentsForUser(
+                normalizedEmail,
+                items.map((item: any) => this._mapEnrollmentItem(item, context.schema))
+            );
+            const alreadyEnrolled = activeEnrollments.some((mapped) => {
                 return (mapped.userEmail || '').toLowerCase() === normalizedEmail &&
                     Number(mapped.certificationId || 0) === normalizedCertificationId;
             });
@@ -5862,7 +6054,7 @@ export class SharePointService {
                 error
             });
 
-            const enrollments = await this.getEnrollments(normalizedEmail);
+            const enrollments = await this._getActiveEnrollmentsForUser(normalizedEmail);
             const alreadyEnrolled = enrollments.some((item) =>
                 (item.userEmail || '').toLowerCase() === normalizedEmail &&
                 Number(item.certificationId || 0) === normalizedCertificationId
@@ -5908,9 +6100,21 @@ export class SharePointService {
         const canonicalCertName = (certification.title || requestedCertName).toString().trim();
         const canonicalCertCode = (certification.code || params.certCode || canonicalCertName).toString().trim();
 
-        const alreadyEnrolled = certification.id
-            ? await this.hasEnrollmentForUserCertificationId(normalizedUserEmail, certification.id, canonicalCertName, canonicalCertCode)
-            : await this.hasEnrollmentForUserCertification(normalizedUserEmail, canonicalCertName, canonicalCertCode);
+        const activeEnrollments = await this._getActiveEnrollmentsForUser(normalizedUserEmail);
+        const alreadyEnrolled = activeEnrollments.some((item) =>
+            (item.userEmail || '').toLowerCase() === normalizedUserEmail &&
+            (
+                (Number(certification.id || 0) > 0 && Number(item.certificationId || 0) === Number(certification.id || 0)) ||
+                (
+                    !!canonicalCertCode &&
+                    (item.certCode || item.pathId || '').toString().trim().toLowerCase() === canonicalCertCode.toLowerCase()
+                ) ||
+                (
+                    !!canonicalCertName &&
+                    (item.certName || item.certificateName || '').toString().trim().toLowerCase() === canonicalCertName.toLowerCase()
+                )
+            )
+        );
         if (alreadyEnrolled) {
             throw new Error('Already enrolled');
         }
@@ -5940,21 +6144,24 @@ export class SharePointService {
 
     public static async fetchUserEnrollments(userEmail?: string, searchText: string = ''): Promise<IEnrollment[]> {
         const normalizedEmail = (userEmail || this.getCurrentContextUserEmail()).toString().trim().toLowerCase();
-        const currentUserId = this.getCurrentContextUserId() || await this._getSiteUserIdByEmail(normalizedEmail);
+        const contextUserEmail = this.getCurrentContextUserEmail().toString().trim().toLowerCase();
+        const currentUserId = normalizedEmail && normalizedEmail === contextUserEmail
+            ? (this.getCurrentContextUserId() || await this._getSiteUserIdByEmail(normalizedEmail))
+            : await this._getSiteUserIdByEmail(normalizedEmail);
         const enrollments = await this.getEnrollments(normalizedEmail, searchText);
         const syncResult = await this.syncDeletedAuditLogs(normalizedEmail, currentUserId || undefined, enrollments);
-        const deletedPathIds = new Set(
-            syncResult.deletedLogs
-                .map((log) => (log.pathId || log.assignmentName || '').toString().trim().toLowerCase())
-                .filter((value) => !!value)
-        );
+        const deletedTimestampByPath = this._getDeletedEnrollmentTimestampByPath(syncResult.deletedLogs);
 
         if (syncResult.removedEnrollmentCount > 0) {
             const refreshed = await this.getEnrollments(normalizedEmail, searchText);
-            return refreshed.filter((item) => !deletedPathIds.has(this._getEnrollmentPathId(item).toLowerCase()));
+            return refreshed.filter((item) => !this._isEnrollmentSuppressedByDeletedAuditLog(item, deletedTimestampByPath));
         }
 
-        return enrollments.filter((item) => !deletedPathIds.has(this._getEnrollmentPathId(item).toLowerCase()));
+        if (deletedTimestampByPath.size === 0) {
+            return enrollments;
+        }
+
+        return enrollments.filter((item) => !this._isEnrollmentSuppressedByDeletedAuditLog(item, deletedTimestampByPath));
     }
 
     public static getCurrentContextUserEmail(): string {
@@ -6059,6 +6266,23 @@ export class SharePointService {
             examDate: (this._readFieldValue(item, schema.examDateField) || '').toString(),
             renewalDate: (this._readFieldValue(item, schema.renewalDateField) || '').toString(),
             examCode: (this._readFieldValue(item, schema.examCodeField) || '').toString().trim(),
+            learnerEmail: (
+                (schema.learnerEmailField ? this._readFieldValue(item, schema.learnerEmailField) : undefined) ||
+                item?.LearnerEmail ||
+                item?.UserEmail ||
+                item?.Email ||
+                item?.Author?.EMail ||
+                item?.Author?.Email ||
+                ''
+            ).toString().trim().toLowerCase(),
+            learnerName: (
+                (schema.learnerNameField ? this._readFieldValue(item, schema.learnerNameField) : undefined) ||
+                item?.LearnerName ||
+                item?.UserName ||
+                item?.Name ||
+                item?.Author?.Title ||
+                ''
+            ).toString().trim(),
             created: (item?.Created || '').toString(),
             modified: (item?.Modified || '').toString(),
             authorEmail: (item?.Author?.EMail || item?.Author?.Email || '').toString().trim().toLowerCase(),
@@ -6090,6 +6314,15 @@ export class SharePointService {
             return [];
         }
 
+        return this.fetchCertificationCompletionsForUser(normalizedUserEmail);
+    }
+
+    public static async fetchCertificationCompletionsForUser(userEmail: string): Promise<ICertificationCompletionRecord[]> {
+        const normalizedUserEmail = (userEmail || '').toString().trim().toLowerCase();
+        if (!normalizedUserEmail) {
+            return [];
+        }
+
         try {
             const siteUrl = this._ensureProductionSiteUrl();
             const listName = await this._ensureCertificationCompletionList();
@@ -6105,7 +6338,55 @@ export class SharePointService {
                 schema.certIdField || '',
                 schema.examDateField || '',
                 schema.renewalDateField || '',
-                schema.examCodeField || ''
+                schema.examCodeField || '',
+                schema.learnerEmailField || '',
+                schema.learnerNameField || ''
+            ].filter((field) => !!field)));
+            const filter = schema.learnerEmailField
+                ? `${schema.learnerEmailField} eq '${this._escapeODataValue(normalizedUserEmail)}'`
+                : `Author/EMail eq '${this._escapeODataValue(normalizedUserEmail)}'`;
+            const endpoint =
+                `${siteUrl}/_api/web/lists/getbytitle('${escapedListName}')/items` +
+                `?$select=${selectFields.join(',')}` +
+                `&$expand=Author` +
+                `&$filter=${encodeURIComponent(filter)}` +
+                `&$orderby=Modified desc` +
+                `&$top=5000` +
+                `&_=${Date.now()}`;
+
+            const data = await this._safeGetJson<any>(endpoint, `${listName} completion records`);
+            return this._toCollection(data)
+                .map((item: any) => this._mapCertificationCompletionRecordItem(item, schema))
+                .filter((item) => {
+                    const recordLearnerEmail = (item.learnerEmail || '').toString().trim().toLowerCase();
+                    const recordAuthorEmail = (item.authorEmail || '').toString().trim().toLowerCase();
+                    return recordLearnerEmail === normalizedUserEmail || recordAuthorEmail === normalizedUserEmail;
+                });
+        } catch (error) {
+            console.warn('[uploadlist] Failed to fetch completion records for user with Author filter. Falling back to local filtering.', {
+                userEmail: normalizedUserEmail,
+                error
+            });
+        }
+
+        try {
+            const siteUrl = this._ensureProductionSiteUrl();
+            const listName = await this._ensureCertificationCompletionList();
+            const schema = await this._getCertificationCompletionListSchema();
+            const escapedListName = this._escapeODataValue(listName);
+            const selectFields = Array.from(new Set([
+                'Id',
+                'Title',
+                'Created',
+                'Modified',
+                'Author/EMail',
+                'Author/Title',
+                schema.certIdField || '',
+                schema.examDateField || '',
+                schema.renewalDateField || '',
+                schema.examCodeField || '',
+                schema.learnerEmailField || '',
+                schema.learnerNameField || ''
             ].filter((field) => !!field)));
             const endpoint =
                 `${siteUrl}/_api/web/lists/getbytitle('${escapedListName}')/items` +
@@ -6115,12 +6396,16 @@ export class SharePointService {
                 `&$top=5000` +
                 `&_=${Date.now()}`;
 
-            const data = await this._safeGetJson<any>(endpoint, `${listName} completion records`);
+            const data = await this._safeGetJson<any>(endpoint, `${listName} completion records fallback`);
             return this._toCollection(data)
                 .map((item: any) => this._mapCertificationCompletionRecordItem(item, schema))
-                .filter((item) => item.authorEmail === normalizedUserEmail);
+                .filter((item) => {
+                    const recordLearnerEmail = (item.learnerEmail || '').toString().trim().toLowerCase();
+                    const recordAuthorEmail = (item.authorEmail || '').toString().trim().toLowerCase();
+                    return recordLearnerEmail === normalizedUserEmail || recordAuthorEmail === normalizedUserEmail;
+                });
         } catch (error) {
-            console.warn('[uploadlist] Failed to fetch completion records for current user.', {
+            console.warn('[uploadlist] Failed to fetch completion records for user.', {
                 userEmail: normalizedUserEmail,
                 error
             });
@@ -6269,12 +6554,16 @@ export class SharePointService {
         examDate: string;
         renewalDate: string;
         examCode?: string;
+        learnerEmail?: string;
+        learnerName?: string;
     }): Promise<ICertificationCompletionRecord> {
         const certificationName = (params.certificationName || '').toString().trim();
         const certId = (params.certId || '').toString().trim();
         const examDate = (params.examDate || '').toString().trim();
         const renewalDate = (params.renewalDate || '').toString().trim();
         const examCode = (params.examCode || '').toString().trim();
+        const learnerEmail = (params.learnerEmail || this.getCurrentContextUserEmail() || '').toString().trim().toLowerCase();
+        const learnerName = (params.learnerName || this.getCurrentContextUserName() || '').toString().trim();
 
         if (!certificationName) {
             throw new Error('Certification name is required.');
@@ -6294,13 +6583,24 @@ export class SharePointService {
         const normalizedDates = this._normalizeCertificationCompletionDates(examDate, renewalDate);
         const digest = await this._getFormDigestValue();
         const endpoint = `${siteUrl}/_api/web/lists/getbytitle('${this._escapeODataValue(listName)}')/items`;
-        const payload = {
+        const payload: Record<string, any> = {
             Title: certificationName,
             [schema.certIdField]: certId,
             [schema.examDateField]: normalizedDates.examDateIso,
-            [schema.renewalDateField]: normalizedDates.renewalDateIso,
-            ...(schema.examCodeField && examCode ? { [schema.examCodeField]: examCode } : {})
+            [schema.renewalDateField]: normalizedDates.renewalDateIso
         };
+
+        if (schema.examCodeField && examCode) {
+            payload[schema.examCodeField] = examCode;
+        }
+
+        if (schema.learnerEmailField && learnerEmail && !this._isPersonOrLookupFieldType(schema.fieldTypes?.[schema.learnerEmailField])) {
+            payload[schema.learnerEmailField] = learnerEmail;
+        }
+
+        if (schema.learnerNameField && learnerName && !this._isPersonOrLookupFieldType(schema.fieldTypes?.[schema.learnerNameField])) {
+            payload[schema.learnerNameField] = learnerName;
+        }
 
         const createdItem = await this._safePostJson<any>(
             endpoint,
@@ -6320,6 +6620,8 @@ export class SharePointService {
             examDate: payload[schema.examDateField],
             renewalDate: payload[schema.renewalDateField],
             examCode,
+            learnerEmail,
+            learnerName,
             created: (createdItem?.Created || '').toString(),
             modified: (createdItem?.Modified || '').toString(),
             authorEmail: (createdItem?.Author?.EMail || createdItem?.Author?.Email || this.getCurrentContextUserEmail() || '').toString().trim().toLowerCase(),
@@ -6333,6 +6635,8 @@ export class SharePointService {
         examDate: string;
         renewalDate: string;
         examCode?: string;
+        learnerEmail?: string;
+        learnerName?: string;
     }): Promise<ICertificationCompletionRecord> {
         const normalizedItemId = Number(itemId);
         if (!Number.isFinite(normalizedItemId) || normalizedItemId <= 0) {
@@ -6342,6 +6646,8 @@ export class SharePointService {
         const certificationName = (params.certificationName || '').toString().trim();
         const certId = (params.certId || '').toString().trim();
         const examCode = (params.examCode || '').toString().trim();
+        const learnerEmail = (params.learnerEmail || this.getCurrentContextUserEmail() || '').toString().trim().toLowerCase();
+        const learnerName = (params.learnerName || this.getCurrentContextUserName() || '').toString().trim();
         if (!certId) {
             throw new Error('CertID is required.');
         }
@@ -6356,11 +6662,22 @@ export class SharePointService {
         const normalizedDates = this._normalizeCertificationCompletionDates(params.examDate, params.renewalDate);
         const digest = await this._getFormDigestValue();
         const endpoint = `${siteUrl}/_api/web/lists/getbytitle('${this._escapeODataValue(listName)}')/items(${normalizedItemId})`;
-        const payload = {
+        const payload: Record<string, any> = {
             [schema.examDateField]: normalizedDates.examDateIso,
-            [schema.renewalDateField]: normalizedDates.renewalDateIso,
-            ...(schema.examCodeField ? { [schema.examCodeField]: examCode } : {})
+            [schema.renewalDateField]: normalizedDates.renewalDateIso
         };
+
+        if (schema.examCodeField) {
+            payload[schema.examCodeField] = examCode;
+        }
+
+        if (schema.learnerEmailField && learnerEmail && !this._isPersonOrLookupFieldType(schema.fieldTypes?.[schema.learnerEmailField])) {
+            payload[schema.learnerEmailField] = learnerEmail;
+        }
+
+        if (schema.learnerNameField && learnerName && !this._isPersonOrLookupFieldType(schema.fieldTypes?.[schema.learnerNameField])) {
+            payload[schema.learnerNameField] = learnerName;
+        }
 
         const response = await this._getHttpClient().post(
             endpoint,
@@ -6387,6 +6704,8 @@ export class SharePointService {
             examDate: normalizedDates.examDateIso,
             renewalDate: normalizedDates.renewalDateIso,
             examCode,
+            learnerEmail,
+            learnerName,
             modified: new Date().toISOString(),
             authorEmail: (this.getCurrentContextUserEmail() || '').toString().trim().toLowerCase(),
             authorName: (this.getCurrentContextUserName() || '').toString().trim()
@@ -6698,7 +7017,7 @@ export class SharePointService {
         const normalizedCertName = (enrollment.certName || '').toString().trim();
         const normalizedCertCode = (enrollment.certCode || '').toString().trim();
         const enrollmentPathId = this._getEnrollmentPathId(enrollment) || (enrollment.certCode || enrollment.certName || '').toString().trim();
-        const existingItems: IEnrollment[] = await this.getEnrollments(enrollment.userEmail).catch(() => [] as IEnrollment[]);
+        const existingItems: IEnrollment[] = await this._getActiveEnrollmentsForUser(enrollment.userEmail).catch(() => [] as IEnrollment[]);
         const existingItem = existingItems.find((item) =>
             (item.userEmail || '').toLowerCase() === normalizedUserEmail &&
             (
@@ -7042,8 +7361,14 @@ export class SharePointService {
     }
 
     public static async getLearnerDirectoryUsers(forceRefresh: boolean = false): Promise<ILearnerDirectoryUser[]> {
+        const availableGroupTitles = await this._getSiteGroupTitles(forceRefresh).catch(() => null);
+
         for (const groupName of this._learnerGroupCandidates) {
-            const groupUsers = await this._fetchNamedSiteGroupUsers(groupName);
+            if (availableGroupTitles && !availableGroupTitles.has(groupName.toLowerCase())) {
+                continue;
+            }
+
+            const groupUsers = await this._fetchNamedSiteGroupUsers(groupName, forceRefresh);
             if (groupUsers.length > 0) {
                 return this._enrichDirectoryUsers(groupUsers);
             }
@@ -7505,13 +7830,18 @@ export class SharePointService {
             enrollments = enrollments.filter((enrollment) => !enrollment.userId || enrollment.userId === auditLog.userId);
         }
 
+        const deletedTimestampByPath = this._getDeletedEnrollmentTimestampByPath([auditLog]);
         const matchingEnrollments = enrollments.filter((enrollment) => {
             const pathId = this._getEnrollmentPathId(enrollment).toLowerCase();
-            if (normalizedPathId) {
-                return pathId === normalizedPathId;
+            if (normalizedPathId && pathId !== normalizedPathId) {
+                return false;
             }
 
-            return normalizedEmail ? (enrollment.userEmail || '').toLowerCase() === normalizedEmail : false;
+            if (!normalizedPathId && normalizedEmail && (enrollment.userEmail || '').toLowerCase() !== normalizedEmail) {
+                return false;
+            }
+
+            return this._isEnrollmentSuppressedByDeletedAuditLog(enrollment, deletedTimestampByPath);
         });
 
         if (matchingEnrollments.length === 0) {
@@ -7541,15 +7871,10 @@ export class SharePointService {
         }
 
         const enrollments = existingEnrollments || await this.getEnrollments((userEmail || '').toString().trim().toLowerCase());
-        const deletedPathIds = new Set(
-            deletedLogs
-                .map((log) => (log.pathId || log.assignmentName || '').toString().trim().toLowerCase())
-                .filter((value) => !!value)
-        );
+        const deletedTimestampByPath = this._getDeletedEnrollmentTimestampByPath(deletedLogs);
 
         const matchedEnrollments = enrollments.filter((enrollment) => {
-            const pathId = this._getEnrollmentPathId(enrollment).toLowerCase();
-            return !!pathId && deletedPathIds.has(pathId);
+            return this._isEnrollmentSuppressedByDeletedAuditLog(enrollment, deletedTimestampByPath);
         });
 
         if (matchedEnrollments.length === 0) {

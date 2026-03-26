@@ -52,7 +52,7 @@ import {
     Send
 } from 'lucide-react';
 
-import { IAssessmentAssignmentRecord, IAssessmentTrackerItem, ICertificationMaxSeatsItem, IDepartmentProgressLearner, IDepartmentProgressSummary, IUpcomingRenewalRecord, LMS_CONTENT_LIBRARY_REFRESH_EVENT, LMS_ENROLLMENTS_REFRESH_EVENT, SharePointService } from '../../learningCenter/services/SharePointService';
+import { IAssessmentAssignmentRecord, IAssessmentTrackerItem, ICertificationCompletionRecord, ICertificationMaxSeatsItem, IDepartmentProgressLearner, IDepartmentProgressSummary, IUpcomingRenewalRecord, LMS_CONTENT_LIBRARY_REFRESH_EVENT, LMS_ENROLLMENTS_REFRESH_EVENT, SharePointService } from '../../learningCenter/services/SharePointService';
 import LayoutScrollWrapper from '../../shared/components/LayoutScrollWrapper';
 import logo from './skysecure_logo_clean_1772790765128.png';
 import './AdminPortal.css';
@@ -3963,6 +3963,9 @@ function ReportsView({ realEnrollments, allUsers }: any) {
     const [upcomingRenewals, setUpcomingRenewals] = React.useState<IUpcomingRenewalRecord[]>([]);
     const [upcomingRenewalsLoading, setUpcomingRenewalsLoading] = React.useState(false);
     const [upcomingRenewalsError, setUpcomingRenewalsError] = React.useState<string | null>(null);
+    const [selectedLearnerCredentialRecords, setSelectedLearnerCredentialRecords] = React.useState<ICertificationCompletionRecord[]>([]);
+    const [selectedLearnerCredentialsLoading, setSelectedLearnerCredentialsLoading] = React.useState(false);
+    const [selectedLearnerCredentialsError, setSelectedLearnerCredentialsError] = React.useState<string | null>(null);
 
     React.useEffect(() => {
         let isMounted = true;
@@ -4065,6 +4068,53 @@ function ReportsView({ realEnrollments, allUsers }: any) {
             isMounted = false;
         };
     }, [realEnrollments]);
+
+    React.useEffect(() => {
+        let isMounted = true;
+        const selectedLearnerEmail = (selectedLearner?.learnerEmail || '').toString().trim().toLowerCase();
+
+        if (!selectedLearnerEmail) {
+            setSelectedLearnerCredentialRecords([]);
+            setSelectedLearnerCredentialsLoading(false);
+            setSelectedLearnerCredentialsError(null);
+            return () => {
+                isMounted = false;
+            };
+        }
+
+        const loadSelectedLearnerCredentials = async () => {
+            setSelectedLearnerCredentialsLoading(true);
+            setSelectedLearnerCredentialRecords([]);
+            setSelectedLearnerCredentialsError(null);
+
+            try {
+                const records = await SharePointService.fetchCertificationCompletionsForUser(selectedLearnerEmail);
+                if (!isMounted) {
+                    return;
+                }
+
+                setSelectedLearnerCredentialRecords((prev) =>
+                    JSON.stringify(prev) === JSON.stringify(records) ? prev : records
+                );
+            } catch (error) {
+                console.error('[Reports] Failed to load selected learner credentials', error);
+                if (isMounted) {
+                    setSelectedLearnerCredentialRecords([]);
+                    setSelectedLearnerCredentialsError('Unable to load certification credentials right now.');
+                }
+            } finally {
+                if (isMounted) {
+                    setSelectedLearnerCredentialsLoading(false);
+                }
+            }
+        };
+
+        void loadSelectedLearnerCredentials();
+
+        return () => {
+            isMounted = false;
+        };
+    }, [realEnrollments, selectedLearner]);
 
     const formatReportDate = React.useCallback((value?: string): string => {
         if (!value) {
@@ -4247,6 +4297,7 @@ function ReportsView({ realEnrollments, allUsers }: any) {
                 learner: (item?.userName || item?.Name || item?.learner || learnerEmail || 'Not Available').toString(),
                 learnerEmail,
                 path: (item?.Title || item?.title || item?.name || item?.certName || item?.certificateName || item?.certCode || 'Not Available').toString(),
+                certCode: (item?.certCode || item?.CertCode || item?.pathId || '').toString().trim(),
                 progress,
                 department: learnerDeptMap[normalizedEmail] || 'Not Available',
                 status: getEnrollmentProgressState(item),
@@ -4488,6 +4539,38 @@ function ReportsView({ realEnrollments, allUsers }: any) {
         return 'not-started';
     };
 
+    const normalizeCredentialMatchKey = React.useCallback((value?: string): string => (
+        (value || '')
+            .toString()
+            .trim()
+            .toLowerCase()
+            .replace(/^microsoft certified[:\s-]*/i, '')
+            .replace(/^aws certified[:\s-]*/i, '')
+            .replace(/^google cloud certified[:\s-]*/i, '')
+            .replace(/^google certified[:\s-]*/i, '')
+            .replace(/[^\w\s]/g, ' ')
+            .replace(/\s+/g, ' ')
+            .trim()
+    ), []);
+
+    const getCredentialLookupKeys = React.useCallback((item: {
+        title?: string;
+        path?: string;
+        certId?: string;
+        examCode?: string;
+        certCode?: string;
+    }): string[] => {
+        const keys = [
+            normalizeCredentialMatchKey(item?.title),
+            normalizeCredentialMatchKey(item?.path),
+            normalizeCredentialMatchKey(item?.certId),
+            normalizeCredentialMatchKey(item?.examCode),
+            normalizeCredentialMatchKey(item?.certCode)
+        ].filter((value) => !!value);
+
+        return Array.from(new Set(keys));
+    }, [normalizeCredentialMatchKey]);
+
     const selectedLearnerCertifications = React.useMemo<IDepartmentProgressLearner[]>(() => {
         if (!selectedLearner?.learnerEmail) {
             return [];
@@ -4502,6 +4585,20 @@ function ReportsView({ realEnrollments, allUsers }: any) {
             })
             .sort((left, right) => Number(right.progress || 0) - Number(left.progress || 0));
     }, [mergedData, selectedLearner]);
+
+    const selectedLearnerCredentialMap = React.useMemo(() => {
+        const credentialMap = new Map<string, ICertificationCompletionRecord>();
+
+        (selectedLearnerCredentialRecords || []).forEach((record) => {
+            getCredentialLookupKeys(record).forEach((matchKey) => {
+                if (matchKey && !credentialMap.has(matchKey)) {
+                    credentialMap.set(matchKey, record);
+                }
+            });
+        });
+
+        return credentialMap;
+    }, [getCredentialLookupKeys, selectedLearnerCredentialRecords]);
 
     const selectedLearnerAssessments = React.useMemo<IAssessmentAssignmentRecord[]>(() => {
         if (!selectedLearner?.learnerEmail) {
@@ -4887,6 +4984,16 @@ function ReportsView({ realEnrollments, allUsers }: any) {
                                     <div style={{ display: 'grid', gap: '0.85rem' }}>
                                         {selectedLearnerCertifications.map((item, index) => {
                                             const status = getLearnerProgressState(item);
+                                            const credentialRecord = status === 'completed'
+                                                ? (
+                                                    getCredentialLookupKeys({
+                                                        path: item.path,
+                                                        certCode: item.certCode
+                                                    })
+                                                        .map((matchKey) => selectedLearnerCredentialMap.get(matchKey))
+                                                        .find((record): record is ICertificationCompletionRecord => !!record) || null
+                                                )
+                                                : null;
                                             return (
                                                 <div key={`${item.learnerEmail}-${item.path}-${index}`} style={{ border: '1px solid #e2e8f0', borderRadius: '18px', padding: '1rem' }}>
                                                     <div style={{ display: 'flex', justifyContent: 'space-between', gap: '0.75rem', alignItems: 'center' }}>
@@ -4914,6 +5021,38 @@ function ReportsView({ realEnrollments, allUsers }: any) {
                                                         </div>
                                                         <span style={{ fontSize: '0.75rem', fontWeight: 900, color: '#1e293b' }}>{Number(item.progress || 0)}%</span>
                                                     </div>
+
+                                                    {status === 'completed' && (
+                                                        <div style={{ marginTop: '0.9rem', padding: '0.9rem', borderRadius: '16px', background: '#f8fafc', border: '1px solid #e2e8f0' }}>
+                                                            <div style={{ fontWeight: 900, color: '#0f172a', marginBottom: '0.75rem' }}>Certification Credentials</div>
+                                                            {selectedLearnerCredentialsLoading ? (
+                                                                <div style={{ color: '#64748b', fontWeight: 700 }}>Loading credentials...</div>
+                                                            ) : credentialRecord ? (
+                                                                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(150px, 1fr))', gap: '0.85rem' }}>
+                                                                    <div>
+                                                                        <div style={{ color: '#94a3b8', fontSize: '0.72rem', fontWeight: 800, textTransform: 'uppercase' }}>Cert ID</div>
+                                                                        <div style={{ color: '#0f172a', fontWeight: 800 }}>{credentialRecord.certId || 'Not Available'}</div>
+                                                                    </div>
+                                                                    <div>
+                                                                        <div style={{ color: '#94a3b8', fontSize: '0.72rem', fontWeight: 800, textTransform: 'uppercase' }}>Exam Code</div>
+                                                                        <div style={{ color: '#0f172a', fontWeight: 800 }}>{credentialRecord.examCode || 'Not Available'}</div>
+                                                                    </div>
+                                                                    <div>
+                                                                        <div style={{ color: '#94a3b8', fontSize: '0.72rem', fontWeight: 800, textTransform: 'uppercase' }}>Exam Date</div>
+                                                                        <div style={{ color: '#0f172a', fontWeight: 800 }}>{formatReportDate(credentialRecord.examDate)}</div>
+                                                                    </div>
+                                                                    <div>
+                                                                        <div style={{ color: '#94a3b8', fontSize: '0.72rem', fontWeight: 800, textTransform: 'uppercase' }}>Renewal Date</div>
+                                                                        <div style={{ color: '#0f172a', fontWeight: 800 }}>{formatReportDate(credentialRecord.renewalDate)}</div>
+                                                                    </div>
+                                                                </div>
+                                                            ) : (
+                                                                <div style={{ color: selectedLearnerCredentialsError ? '#ef4444' : '#94a3b8', fontWeight: 700 }}>
+                                                                    {selectedLearnerCredentialsError || 'No credentials uploaded'}
+                                                                </div>
+                                                            )}
+                                                        </div>
+                                                    )}
                                                 </div>
                                             );
                                         })}
@@ -6235,11 +6374,6 @@ function AssignmentsView({ taxonomyData, allUsers, seatManagedCerts, userEmail, 
             window.setTimeout(() => {
                 window.dispatchEvent(new Event(LMS_AUDIT_REFRESH_EVENT));
             }, 500);
-
-            let audit = [];
-            try { audit = JSON.parse(localStorage.getItem('lmsAuditLogs') || '[]'); } catch (e) { }
-            audit.unshift({ id: Date.now(), user: userEmail || 'Admin', action: 'ASSIGN_CERT', detail: `Assigned ${assignmentDetails.certCode} to ${userObj.email}`, timestamp: new Date().toISOString() });
-            localStorage.setItem('lmsAuditLogs', JSON.stringify(audit.slice(0, 50)));
 
             if (onEnrollmentsChanged) {
                 await onEnrollmentsChanged();
